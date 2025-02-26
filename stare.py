@@ -105,38 +105,67 @@ class PriceMonitor(tk.Toplevel):
 
     async def websocket_connect(self):
         """建立并维护 WebSocket 连接"""
-        try:
-            async with websockets.connect(WS_URL) as ws:
-                self.ws = ws
-                # 订阅所有选中交易对的 tickers
-                subscribe_msg = {
-                    "op": "subscribe",
-                    "args": [
-                        {
-                            "channel": "tickers",
-                            "instId": pair
-                        } for pair in self.selected_pairs
-                    ]
-                }
-                await ws.send(json.dumps(subscribe_msg))
-                
-                # 持续接收消息
-                while self.running:
-                    try:
-                        message = await ws.recv()
-                        # 更新流量统计（添加接收到的消息大小）
-                        self.update_traffic_stats(len(message))
-                        data = json.loads(message)
-                        if 'data' in data:
-                            self.handle_ticker_update(data['data'][0])
-                    except Exception as e:
-                        print(f"处理 WebSocket 消息时出错: {e}")
-                        await asyncio.sleep(1)
-        except Exception as e:
-            print(f"WebSocket 连接错误: {e}")
-            if self.running:
-                await asyncio.sleep(5)
-                asyncio.create_task(self.websocket_connect())
+        while self.running:  # 添加外层循环以支持重连
+            try:
+                async with websockets.connect(WS_URL) as ws:
+                    self.ws = ws
+                    # 订阅所有选中交易对的 tickers
+                    subscribe_msg = {
+                        "op": "subscribe",
+                        "args": [
+                            {
+                                "channel": "tickers",
+                                "instId": pair
+                            } for pair in self.selected_pairs
+                        ]
+                    }
+                    await ws.send(json.dumps(subscribe_msg))
+                    
+                    # 添加心跳检测
+                    last_msg_time = time.time()
+                    
+                    # 持续接收消息
+                    while self.running:
+                        try:
+                            # 设置接收超时
+                            message = await asyncio.wait_for(ws.recv(), timeout=5)
+                            last_msg_time = time.time()
+                            
+                            # 更新流量统计（添加接收到的消息大小）
+                            self.update_traffic_stats(len(message))
+                            data = json.loads(message)
+                            if 'data' in data:
+                                self.handle_ticker_update(data['data'][0])
+                            
+                            # 检查是否需要发送心跳
+                            if time.time() - last_msg_time > 20:
+                                ping_msg = {"op": "ping"}
+                                await ws.send(json.dumps(ping_msg))
+                                
+                        except asyncio.TimeoutError:
+                            # 超时后尝试发送心跳
+                            try:
+                                ping_msg = {"op": "ping"}
+                                await ws.send(json.dumps(ping_msg))
+                            except:
+                                # 如果发送心跳失败，跳出内层循环进行重连
+                                break
+                        except Exception as e:
+                            logging.error(f"处理 WebSocket 消息时出错: {e}")
+                            # 短暂等待后继续尝试
+                            await asyncio.sleep(1)
+                            
+                            # 如果太长时间没有收到消息，跳出内层循环进行重连
+                            if time.time() - last_msg_time > 30:
+                                break
+                            
+            except Exception as e:
+                logging.error(f"WebSocket 连接错误: {e}")
+                if self.running:
+                    # 连接失败后等待一段时间再重试
+                    await asyncio.sleep(5)
+                    # 继续外层循环，进行重连
+                    continue
 
     def handle_ticker_update(self, ticker_data):
         """处理 WebSocket ticker 更新"""
