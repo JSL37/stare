@@ -444,4 +444,18 @@ def main():
     root.mainloop()
 
 if __name__ == "__main__":
+ever', ''),
+                                item.get('ctValCcy', ''))
+                        self.tree.insert('', 'end', values=values)
+            else:
+                messagebox.showerror("错误", "获取数据失败，请检查网络连接")
+        except Exception as e:
+            messagebox.showerror("错误", f"加载数据时出错：{str(e)}\n请检查网络连接后重试")
+
+def main():
+    root = tk.Tk()
+    app = CryptoDataViewer(root)
+    root.mainloop()
+
+if __name__ == "__main__":
     main()
