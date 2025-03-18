@@ -9,6 +9,7 @@ import time
 import threading
 import logging
 import aiohttp
+import sys
 
 # API 配置
 OKX_BASE_URL = "https://www.okx.com"
@@ -16,28 +17,49 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 BINANCE_BASE_URL = "https://fapi.binance.com"
 BINANCE_WS_URL = "wss://fstream.binance.com/stream"
 
-PROXY = {
-    'http': 'http://127.0.0.1:7890',  # 根据实际代理端口修改
-    'https': 'http://127.0.0.1:7890'
+# 默认代理设置，将在UI中可修改
+DEFAULT_PROXY = {
+    'http': 'http://127.0.0.1:7897',
+    'https': 'http://127.0.0.1:7897'
 }
 
 class PriceMonitor(tk.Toplevel):
-    def __init__(self, selected_pairs, exchange="okx", update_freq=1.0):
+    def __init__(self, selected_pairs, exchange="okx", use_proxy=False, proxy_settings=None):
         super().__init__()
         self.selected_pairs = selected_pairs
-        self.exchange = exchange.lower()  # 存储交易所信息
+        self.exchange = exchange.lower()
         self.ws = None
-        self.ws_task = None
-        self.update_freq = update_freq  # 存储更新频率
         self.loop = None
+        self.running = True
+        self.use_proxy = use_proxy
+        self.proxy_settings = proxy_settings
         
-        # 设置窗口完全透明和置顶
+        # 设置窗口属性
+        self.setup_window()
+        # 创建UI组件
+        self.create_ui()
+        # 启动WebSocket连接
+        threading.Thread(target=self.run_async_loop, daemon=True).start()
+        
+        # 绑定鼠标事件
+        self.bind('<Enter>', self.on_enter)
+        self.bind('<Leave>', self.on_leave)
+        self.title_frame.bind('<Button-1>', self.start_move)
+        self.title_frame.bind('<B1-Motion>', self.on_move)
+        
+        # 初始状态设置为半透明
+        self.on_leave(None)
+    
+    def setup_window(self):
+        """设置窗口属性"""
         self.attributes('-alpha', 1.0, '-topmost', True, '-transparentcolor', 'white')
         self.configure(bg='white')
         self.title("价格监控")
         self.geometry("300x400")
         self.overrideredirect(True)
-        
+    
+    def create_ui(self):
+        """创建UI组件"""
         # 创建主框架
         self.main_frame = ttk.Frame(self)
         self.main_frame.pack(fill='both', expand=True, padx=5, pady=5)
@@ -61,23 +83,13 @@ class PriceMonitor(tk.Toplevel):
             width=3,
             command=self.quit_app
         )
-        # 不要立即pack关闭按钮，等待鼠标移入时再显示
         
         # 创建价格显示区域
         self.price_frame = ttk.Frame(self.main_frame)
         self.price_frame.pack(fill='both', expand=True)
         
         # 样式设置
-        self.style = ttk.Style()
-        self.style.configure("Transparent.TFrame", background='white')
-        self.style.configure("Transparent.TLabel", 
-                           background='white',
-                           font=('Arial', 10),
-                           foreground='#333333')
-        
-        self.main_frame.configure(style="Transparent.TFrame")
-        self.price_frame.configure(style="Transparent.TFrame")
-        self.title_frame.configure(style="Transparent.TFrame")
+        self.setup_styles()
         
         # 存储标签的字典和流量统计
         self.price_labels = {}
@@ -92,7 +104,7 @@ class PriceMonitor(tk.Toplevel):
         self.traffic_label.pack(pady=2)
         
         # 为每个选中的交易对创建标签
-        for pair in selected_pairs:
+        for pair in self.selected_pairs:
             label = ttk.Label(
                 self.price_frame, 
                 text=f"{pair}: 加载中...",
@@ -100,29 +112,45 @@ class PriceMonitor(tk.Toplevel):
             )
             label.pack(pady=2)
             self.price_labels[pair] = label
+    
+    def setup_styles(self):
+        """设置UI样式"""
+        self.style = ttk.Style()
+        self.style.configure("Transparent.TFrame", background='white')
+        self.style.configure("Transparent.TLabel", 
+                           background='white',
+                           font=('Arial', 10),
+                           foreground='#333333')
         
-        # 启动 WebSocket 连接
-        self.running = True
-        # 在新线程中运行事件循环
-        threading.Thread(target=self.run_async_loop, daemon=True).start()
-        
-        # 绑定鼠标事件
-        self.bind('<Enter>', self.on_enter)
-        self.bind('<Leave>', self.on_leave)
-        self.title_frame.bind('<Button-1>', self.start_move)
-        self.title_frame.bind('<B1-Motion>', self.on_move)
-        
-        # 初始状态设置为半透明
-        self.on_leave(None)
+        self.main_frame.configure(style="Transparent.TFrame")
+        self.price_frame.configure(style="Transparent.TFrame")
+        self.title_frame.configure(style="Transparent.TFrame")
 
     def run_async_loop(self):
         """在新线程中运行事件循环"""
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        if self.exchange == "okx":
-            self.loop.run_until_complete(self.okx_websocket_connect())
-        elif self.exchange == "binance":
-            self.loop.run_until_complete(self.binance_websocket_connect())
+        try:
+            # 在Windows上使用SelectorEventLoop
+            if sys.platform.startswith('win'):
+                loop = asyncio.SelectorEventLoop()
+                asyncio.set_event_loop(loop)
+            else:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            self.loop = loop
+            
+            if self.exchange == "okx":
+                self.loop.run_until_complete(self.okx_websocket_connect())
+            elif self.exchange == "binance":
+                self.loop.run_until_complete(self.binance_websocket_connect())
+        except Exception as e:
+            logging.error(f"WebSocket事件循环错误: {e}")
+        finally:
+            # 确保循环正确关闭
+            if self.loop and self.loop.is_running():
+                self.loop.stop()
+            if self.loop and not self.loop.is_closed():
+                self.loop.close()
 
     async def okx_websocket_connect(self):
         """建立并维护OKX WebSocket连接"""
@@ -160,20 +188,17 @@ class PriceMonitor(tk.Toplevel):
                             
                             # 检查是否需要发送心跳
                             if time.time() - last_msg_time > 20:
-                                ping_msg = {"op": "ping"}
-                                await ws.send(json.dumps(ping_msg))
+                                await ws.send(json.dumps({"op": "ping"}))
                                 
                         except asyncio.TimeoutError:
                             # 超时后尝试发送心跳
                             try:
-                                ping_msg = {"op": "ping"}
-                                await ws.send(json.dumps(ping_msg))
+                                await ws.send(json.dumps({"op": "ping"}))
                             except:
                                 # 如果发送心跳失败，跳出内层循环进行重连
                                 break
                         except Exception as e:
                             logging.error(f"处理 WebSocket 消息时出错: {e}")
-                            # 短暂等待后继续尝试
                             await asyncio.sleep(1)
                             
                             # 如果太长时间没有收到消息，跳出内层循环进行重连
@@ -185,8 +210,6 @@ class PriceMonitor(tk.Toplevel):
                 if self.running:
                     # 连接失败后等待一段时间再重试
                     await asyncio.sleep(5)
-                    # 继续外层循环，进行重连
-                    continue
 
     async def binance_websocket_connect(self):
         """建立并维护Binance WebSocket连接"""
@@ -201,11 +224,16 @@ class PriceMonitor(tk.Toplevel):
                     "id": 1
                 }
                 
-                connector = aiohttp.TCPConnector(ssl=False)
+                # 修改连接器配置，禁用DNS缓存
+                connector = aiohttp.TCPConnector(ssl=False, use_dns_cache=False)
+                
+                # 根据代理设置决定是否使用代理
+                proxy = self.proxy_settings.get('http', None) if self.use_proxy else None
+                
                 async with aiohttp.ClientSession(connector=connector) as session:
                     async with session.ws_connect(
                         BINANCE_WS_URL,
-                        proxy=PROXY.get('http', None),
+                        proxy=proxy,
                         timeout=aiohttp.ClientTimeout(total=30),
                         heartbeat=20
                     ) as ws:
@@ -218,19 +246,18 @@ class PriceMonitor(tk.Toplevel):
                                 # 添加流量统计
                                 self.update_traffic_stats(len(msg.data))
                                 data = json.loads(msg.data)
-                                if 'data' in data:
+                                # 修正数据处理逻辑
+                                if 'e' in data and data['e'] == '24hrTicker':
+                                    self.handle_binance_ticker_update(data)
+                                elif 'data' in data:
                                     self.handle_binance_ticker_update(data['data'])
-                            elif msg.type == aiohttp.WSMsgType.ERROR:
-                                logging.error(f"WebSocket错误: {msg.data}")
-                                break
-                            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                                 break
 
             except Exception as e:
                 logging.error(f"Binance WebSocket 连接错误: {e}")
                 if self.running:
                     await asyncio.sleep(5)
-                    continue
 
     def handle_okx_ticker_update(self, ticker_data):
         """处理OKX WebSocket ticker更新"""
@@ -241,38 +268,14 @@ class PriceMonitor(tk.Toplevel):
             high_24h = float(ticker_data['high24h'])
             low_24h = float(ticker_data['low24h'])
             
-            # 格式化价格显示逻辑保持不变
-            if last_price >= 1000:
-                formatted_price = f"{last_price:,.2f}"
-            elif last_price >= 1:
-                formatted_price = f"{last_price:.4f}"
-            elif last_price >= 0.0001:
-                formatted_price = f"{last_price:.6f}"
-            else:
-                formatted_price = f"{last_price:.8f}"
-            
-            # 计算涨跌幅逻辑保持不变
-            if open_price > 0:
-                change_pct = ((last_price - open_price) / open_price) * 100
-                if change_pct > 0:
-                    color = 'green'
-                    change_text = f"+{change_pct:.2f}%"
-                else:
-                    color = 'red'
-                    change_text = f"{change_pct:.2f}%"
-                
-                display_text = (
-                    f"{pair}: {formatted_price} ({change_text})\n"
-                    f"24h高: {high_24h:.4f} 低: {low_24h:.4f}"
-                )
-            else:
-                display_text = f"{pair}: {formatted_price}"
-                color = 'black'
+            # 格式化价格和计算涨跌幅
+            formatted_price = self.format_price(last_price)
+            display_text, color = self.calculate_change(pair, last_price, open_price, high_24h, low_24h, formatted_price)
             
             self.after(0, self.update_label_safe, pair, display_text, color)
             
         except Exception as e:
-            print(f"处理OKX ticker更新时出错: {e}")
+            logging.error(f"处理OKX ticker更新时出错: {e}")
 
     def handle_binance_ticker_update(self, ticker_data):
         """处理 Binance WebSocket ticker 更新"""
@@ -285,51 +288,58 @@ class PriceMonitor(tk.Toplevel):
                 # 将原始交易对转换为 Binance 格式进行比较
                 cleaned_pair = original_pair.replace('-', '').replace('SWAP', '').upper()
                 if cleaned_pair == symbol:
-                    last_price = float(ticker_data['c'])  # 最新价格
-                    open_price = float(ticker_data['o'])  # 24小时开盘价
-                    high_24h = float(ticker_data['h'])    # 24小时最高价
-                    low_24h = float(ticker_data['l'])     # 24小时最低价
+                    last_price = float(ticker_data.get('c', ticker_data.get('lastPrice', 0)))  # 最新价格
+                    open_price = float(ticker_data.get('o', ticker_data.get('openPrice', 0)))  # 24小时开盘价
+                    high_24h = float(ticker_data.get('h', ticker_data.get('highPrice', 0)))    # 24小时最高价
+                    low_24h = float(ticker_data.get('l', ticker_data.get('lowPrice', 0)))     # 24小时最低价
                     
-                    # 格式化价格显示
-                    if last_price >= 1000:
-                        formatted_price = f"{last_price:,.2f}"
-                    elif last_price >= 1:
-                        formatted_price = f"{last_price:.4f}"
-                    elif last_price >= 0.0001:
-                        formatted_price = f"{last_price:.6f}"
-                    else:
-                        formatted_price = f"{last_price:.8f}"
-                    
-                    # 计算涨跌幅
-                    if open_price > 0:
-                        change_pct = ((last_price - open_price) / open_price) * 100
-                        if change_pct > 0:
-                            color = 'green'
-                            change_text = f"+{change_pct:.2f}%"
-                        else:
-                            color = 'red'
-                            change_text = f"{change_pct:.2f}%"
-                        
-                        display_text = (
-                            f"{original_pair}: {formatted_price} ({change_text})\n"
-                            f"24h高: {high_24h:.4f} 低: {low_24h:.4f}"
-                        )
-                    else:
-                        display_text = f"{original_pair}: {formatted_price}"
-                        color = 'black'
+                    # 格式化价格和计算涨跌幅
+                    formatted_price = self.format_price(last_price)
+                    display_text, color = self.calculate_change(original_pair, last_price, open_price, high_24h, low_24h, formatted_price)
                     
                     self.after(0, self.update_label_safe, original_pair, display_text, color)
                     break
                 
         except Exception as e:
             logging.error(f"处理 Binance ticker 更新时出错: {e}")
+    
+    def format_price(self, price):
+        """格式化价格显示"""
+        if price >= 1000:
+            return f"{price:,.2f}"
+        elif price >= 1:
+            return f"{price:.4f}"
+        elif price >= 0.0001:
+            return f"{price:.6f}"
+        else:
+            return f"{price:.8f}"
+    
+    def calculate_change(self, pair, last_price, open_price, high_24h, low_24h, formatted_price):
+        """计算价格变化并返回显示文本和颜色"""
+        if open_price > 0:
+            change_pct = ((last_price - open_price) / open_price) * 100
+            if change_pct > 0:
+                color = 'green'
+                change_text = f"+{change_pct:.2f}%"
+            else:
+                color = 'red'
+                change_text = f"{change_pct:.2f}%"
+            
+            display_text = (
+                f"{pair}: {formatted_price} ({change_text})\n"
+                f"24h高: {high_24h:.4f} 低: {low_24h:.4f}"
+            )
+        else:
+            display_text = f"{pair}: {formatted_price}"
+            color = 'black'
+        
+        return display_text, color
 
     def quit_app(self):
         """完全退出应用"""
         self.running = False
-        if self.ws:
-            if self.loop and self.loop.is_running():
-                self.loop.create_task(self.ws.close())
+        if self.ws and self.loop and self.loop.is_running():
+            self.loop.create_task(self.ws.close())
         if self.loop:
             self.loop.stop()
         self.destroy()  # 只关闭监控窗口
@@ -393,7 +403,7 @@ class PriceMonitor(tk.Toplevel):
                     foreground=color
                 )
         except Exception as e:
-            print(f"更新标签出错: {e}")
+            logging.error(f"更新标签出错: {e}")
 
 class CryptoDataViewer:
     def __init__(self, root):
@@ -404,11 +414,14 @@ class CryptoDataViewer:
         # 添加交易所选择
         self.exchange = tk.StringVar(value="okx")  # 默认为OKX
         
-        # 创建顶部框架
+        # 代理设置
+        self.use_proxy = tk.BooleanVar(value=False)  # 默认不使用代理
+        self.proxy_host = tk.StringVar(value="127.0.0.1")
+        self.proxy_port = tk.StringVar(value="7897")
+        
+        # 创建UI组件
         self.create_top_frame()
-        # 创建表格
         self.create_table()
-        # 加载数据
         self.load_data()
 
     def create_top_frame(self):
@@ -435,17 +448,20 @@ class CryptoDataViewer:
         self.search_entry.pack(side='left', padx=5)
         ttk.Button(search_frame, text="搜索", command=self.search_currency).pack(side='left', padx=5)
         
-        # 更新频率设置
-        frequency_frame = ttk.Frame(top_frame)
-        frequency_frame.pack(side='right')
+        # 代理设置框架
+        proxy_frame = ttk.Frame(top_frame)
+        proxy_frame.pack(side='left', padx=20)
         
-        ttk.Label(frequency_frame, text="更新频率(秒):").pack(side='left', padx=5)
-        self.update_freq = ttk.Entry(frequency_frame, width=5)
-        self.update_freq.insert(0, "1")  # 默认1秒
-        self.update_freq.pack(side='left', padx=5)
+        ttk.Checkbutton(proxy_frame, text="使用代理", variable=self.use_proxy).pack(side='left')
+        ttk.Label(proxy_frame, text="主机:").pack(side='left', padx=2)
+        ttk.Entry(proxy_frame, textvariable=self.proxy_host, width=12).pack(side='left', padx=2)
+        ttk.Label(proxy_frame, text="端口:").pack(side='left', padx=2)
+        ttk.Entry(proxy_frame, textvariable=self.proxy_port, width=6).pack(side='left', padx=2)
         
         # 盯盘提交按钮
-        ttk.Button(frequency_frame, text="盯盘提交", command=self.start_monitoring).pack(side='left', padx=5)
+        submit_frame = ttk.Frame(top_frame)
+        submit_frame.pack(side='right', padx=10)
+        ttk.Button(submit_frame, text="盯盘提交", command=self.start_monitoring).pack(side='right')
 
     def create_table(self):
         # 创建一个框架来容纳表格和滚动条
@@ -519,7 +535,11 @@ class CryptoDataViewer:
             params = {
                 "instType": "SWAP"  # 获取永续合约
             }
-            response = requests.get(url, params=params)
+            
+            # 根据代理设置决定是否使用代理
+            proxy = self.get_proxy_settings() if self.use_proxy.get() else None
+            
+            response = requests.get(url, params=params, proxies=proxy)
             result = response.json()
             
             if result and 'data' in result:
@@ -544,7 +564,11 @@ class CryptoDataViewer:
         try:
             # 获取Binance的合约信息
             url = urljoin(BINANCE_BASE_URL, "/fapi/v1/exchangeInfo")
-            response = requests.get(url)
+            
+            # 根据代理设置决定是否使用代理
+            proxy = self.get_proxy_settings() if self.use_proxy.get() else None
+            
+            response = requests.get(url, proxies=proxy)
             result = response.json()
             
             if result and 'symbols' in result:
@@ -575,6 +599,18 @@ class CryptoDataViewer:
         except Exception as e:
             messagebox.showerror("错误", f"加载Binance数据时出错：{str(e)}\n请检查网络连接后重试")
 
+    def get_proxy_settings(self):
+        """根据UI中的设置构建代理字典"""
+        host = self.proxy_host.get()
+        port = self.proxy_port.get()
+        if host and port:
+            proxy_url = f"http://{host}:{port}"
+            return {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+        return None
+
     def search_currency(self):
         search_text = self.search_var.get().upper()
         for item in self.tree.get_children():
@@ -594,16 +630,19 @@ class CryptoDataViewer:
                 selected_pairs.append(values[1])  # 添加交易对ID
         
         if selected_pairs:
-            try:
-                update_freq = float(self.update_freq.get())
-                if update_freq < 0.1:  # 设置最小更新间隔
-                    update_freq = 0.1
-                # 创建价格监控窗口，传入更新频率和交易所信息
-                monitor = PriceMonitor(selected_pairs, self.exchange.get(), update_freq)
-                # 关闭主窗口
-                self.root.withdraw()
-            except ValueError:
-                tk.messagebox.showwarning("警告", "请输入有效的更新频率")
+            # 获取代理设置
+            use_proxy = self.use_proxy.get()
+            proxy_settings = self.get_proxy_settings() if use_proxy else None
+            
+            # 创建价格监控窗口，传入交易所信息和代理设置
+            monitor = PriceMonitor(
+                selected_pairs, 
+                self.exchange.get(),
+                use_proxy,
+                proxy_settings
+            )
+            # 关闭主窗口
+            self.root.withdraw()
         else:
             tk.messagebox.showwarning("警告", "请至少选择一个交易对")
 
